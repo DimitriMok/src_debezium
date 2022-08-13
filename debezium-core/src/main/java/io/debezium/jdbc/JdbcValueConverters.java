@@ -96,8 +96,9 @@ public class JdbcValueConverters implements ValueConverterProvider {
     private final String fallbackTimeWithTimeZone;
     protected final boolean adaptiveTimePrecisionMode;
     protected final boolean adaptiveTimeMicrosecondsPrecisionMode;
+    protected final boolean connectPrecisionMode;
     protected final DecimalMode decimalMode;
-    private final TemporalAdjuster adjuster;
+    protected final TemporalAdjuster adjuster;
     protected final BigIntUnsignedMode bigIntUnsignedMode;
     protected final BinaryHandlingMode binaryMode;
 
@@ -131,6 +132,7 @@ public class JdbcValueConverters implements ValueConverterProvider {
         this.defaultOffset = defaultOffset != null ? defaultOffset : ZoneOffset.UTC;
         this.adaptiveTimePrecisionMode = temporalPrecisionMode.equals(TemporalPrecisionMode.ADAPTIVE);
         this.adaptiveTimeMicrosecondsPrecisionMode = temporalPrecisionMode.equals(TemporalPrecisionMode.ADAPTIVE_TIME_MICROSECONDS);
+        this.connectPrecisionMode = temporalPrecisionMode.equals(TemporalPrecisionMode.CONNECT);
         this.decimalMode = decimalMode != null ? decimalMode : DecimalMode.PRECISE;
         this.adjuster = adjuster;
         this.bigIntUnsignedMode = bigIntUnsignedMode != null ? bigIntUnsignedMode : BigIntUnsignedMode.PRECISE;

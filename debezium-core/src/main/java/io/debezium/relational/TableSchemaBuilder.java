@@ -6,7 +6,11 @@
 package io.debezium.relational;
 
 import java.sql.Types;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
@@ -17,6 +21,7 @@ import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.DataException;
+import org.apache.kafka.connect.errors.NotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -133,12 +138,20 @@ public class TableSchemaBuilder {
                 .withSource(sourceInfoSchema)
                 .build();
 
+        Set<Column> keyColumnsThatShouldBeAddedSet = new HashSet<>(tableKey.keyColumns());
+        List<Column> columnsThatShouldBeAdded = table.columns().stream()
+                .filter(column -> filter == null || filter.matches(tableId.catalog(), tableId.schema(), tableId.table(), column.name()))
+                .collect(Collectors.toList());
+        Set<Column> valueColumnsThatShouldBeAddedSet = new HashSet<>(columnsThatShouldBeAdded);
+        Map<Column, ValueConverter> converters = convertersForColumnsMap(keySchema, valSchema, tableId, columnsThatShouldBeAdded, mappers);
+
         // Create the generators ...
-        StructGenerator keyGenerator = createKeyGenerator(keySchema, tableId, tableKey.keyColumns());
-        StructGenerator valueGenerator = createValueGenerator(valSchema, tableId, table.columns(), filter, mappers);
+        StructAppender keyAppender = createKeyAppender(keySchema, tableId);
+        StructAppender valueAppender = createValueAppender(valSchema, tableId);
 
         // And the table schema ...
-        return new TableSchema(tableId, keySchema, keyGenerator, envelope, valSchema, valueGenerator);
+        return new TableSchema(tableId, keySchema, keyAppender, envelope, valSchema, valueAppender, keyColumnsThatShouldBeAddedSet, valueColumnsThatShouldBeAddedSet,
+                converters);
     }
 
     /**
@@ -200,6 +213,22 @@ public class TableSchemaBuilder {
                     }
                 }
                 return result;
+            };
+        }
+        return null;
+    }
+
+    protected StructAppender createKeyAppender(Schema schema, TableId columnSetName) {
+        if (schema != null) {
+            return (struct, column, value) -> {
+                try {
+                    struct.put(schema.field(fieldNamer.fieldNameFor(column)), value);
+                }
+                catch (DataException e) {
+                    LOGGER.error("Failed to properly convert key value for '{}.{}' of type {} for row {}:",
+                            columnSetName, column.name(), column.typeName(), struct.toString(), e);
+                }
+                return struct;
             };
         }
         return null;
@@ -282,6 +311,30 @@ public class TableSchemaBuilder {
         return null;
     }
 
+    protected StructAppender createValueAppender(Schema schema, TableId tableId) {
+        if (schema != null) {
+            return (struct, column, value) -> {
+                try {
+                    struct.put(schema.field(fieldNamer.fieldNameFor(column)), value);
+                }
+                catch (DataException | IllegalArgumentException e) {
+                    LOGGER.error(
+                            "Failed to properly convert data value for '{}.{}' of type {} for row {}. The column jdbc type is {}, But the target schema type of convertion is {}:",
+                            tableId, column.name(), column.typeName(), struct.toString(), column.jdbcType(),
+                            schema.field(fieldNamer.fieldNameFor(column)).schema().type(), e);
+                }
+                catch (final Exception e) {
+                    LOGGER.error(
+                            "Failed to properly convert data value for '{}.{}' of type {} for row {}. The column jdbc type is {}, But the target schema type of convertion is {}:",
+                            tableId, column.name(), column.typeName(), struct.toString(), column.jdbcType(),
+                            schema.field(fieldNamer.fieldNameFor(column)).schema().type(), e);
+                }
+                return struct;
+            };
+        }
+        return null;
+    }
+
     protected int[] indexesForColumns(List<Column> columns) {
         int[] recordIndexes = new int[columns.size()];
         AtomicInteger i = new AtomicInteger(0);
@@ -332,6 +385,53 @@ public class TableSchemaBuilder {
         }
 
         return converters;
+    }
+
+    protected Map<Column, ValueConverter> convertersForColumnsMap(Schema keySchema, Schema valschema, TableId tableId, List<Column> columns, ColumnMappers mappers) {
+
+        Map<Column, ValueConverter> converters = new HashMap();
+        String fieldName;
+        Field field;
+        ValueConverter converter;
+        for (int i = 0; i < columns.size(); i++) {
+            Column column = columns.get(i);
+            fieldName = fieldNamer.fieldNameFor(column);
+            if (valschema.field(fieldName) != null) {
+                field = valschema.field(fieldName);
+                converter = createValueConverterFor(tableId, column, field);
+                converter = wrapInMappingConverterIfNeeded(mappers, tableId, column, converter);
+            }
+            else if (keySchema.field(fieldName) != null) {
+                field = keySchema.field(fieldName);
+                converter = createValueConverterFor(tableId, column, field);
+                converter = wrapInMappingConverterIfNeeded(null, tableId, column, converter);
+            }
+            else {
+                throw new NotFoundException(
+                        "No converter found for column " + column.name() + " in keySchema and valSchema. The column will not be part of change events for that table.");
+            }
+            if (converter == null) {
+                LOGGER.warn(
+                        "No converter found for column {}.{} of type {}. The column will not be part of change events for that table.",
+                        tableId, column.name(), column.typeName());
+            }
+
+            // may be null if no converter found
+            converters.put(column, converter);
+        }
+
+        return converters;
+    }
+
+    protected ValueConverter convertersForColumns(Schema schema, TableId tableId, Column column, ColumnMappers mappers) {
+        ValueConverter converter = createValueConverterFor(tableId, column, schema.field(fieldNamer.fieldNameFor(column)));
+        converter = wrapInMappingConverterIfNeeded(mappers, tableId, column, converter);
+        if (converter == null) {
+            LOGGER.warn(
+                    "No converter found for column {}.{} of type {}. The column will not be part of change events for that table.",
+                    tableId, column.name(), column.typeName());
+        }
+        return converter;
     }
 
     private ValueConverter wrapInMappingConverterIfNeeded(ColumnMappers mappers, TableId tableId, Column column, ValueConverter converter) {

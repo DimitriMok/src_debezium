@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -20,6 +21,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -35,6 +38,7 @@ import io.debezium.pipeline.source.spi.StreamingChangeEventSource;
 import io.debezium.pipeline.spi.ChangeRecordEmitter;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.spi.SnapshotResult;
+import io.debezium.schema.DataCollectionSchema;
 import io.debezium.schema.SchemaChangeEvent;
 import io.debezium.util.Clock;
 import io.debezium.util.ColumnUtils;
@@ -344,6 +348,15 @@ public abstract class RelationalSnapshotChangeEventSource<O extends OffsetContex
             long rows = 0;
             Timer logTimer = getTableScanLogTimer();
             snapshotContext.lastRecordInTable = false;
+            final int column_len = columnArray.getColumns().length;
+            final DataCollectionSchema dataCollectionSchema = dispatcher.getCollectionSchema(table.id());
+            final TableSchema tableSchema = (TableSchema) dataCollectionSchema;
+            final Column[] columns = columnArray.getColumns();
+            final Schema keySchema = tableSchema.keySchema();
+            final Schema valSchema = tableSchema.valueSchema();
+            final Set<Column> keySet = tableSchema.getKeySet();
+            final Set<Column> valueSet = tableSchema.getValueSet();
+            final Map<Column, ValueConverter> converters = tableSchema.getConverters();
 
             if (rs.next()) {
                 while (!snapshotContext.lastRecordInTable) {
@@ -352,8 +365,23 @@ public abstract class RelationalSnapshotChangeEventSource<O extends OffsetContex
                     }
 
                     rows++;
-                    final Object[] row = jdbcConnection.rowToArray(table, schema(), rs, columnArray);
-
+                    Struct newKey = new Struct(keySchema);
+                    Struct newValue = new Struct(valSchema);
+                    for (int i = 0; i < column_len; i++) {
+                        Column column = columns[i];
+                        Object value = rs.getObject(i + 1);
+                        if (keySet.contains(column) || valueSet.contains(column)) {
+                            value = converters.get(column).convert(value);
+                        }
+                        if (keySet.contains(column)) {
+                            newKey = tableSchema.keyFromColumnData(newKey, column, value);
+                        }
+                        if (valueSet.contains(column)) {
+                            newValue = tableSchema.valueFromColumnData(newValue, column, value);
+                        }
+                    }
+                    snapshotContext.offset.event(table.id(), getClock().currentTime());
+                    Struct envelope = tableSchema.getEnvelopeSchema().read(newValue, snapshotContext.offset.getSourceInfo(), clock.currentTimeAsInstant());
                     snapshotContext.lastRecordInTable = !rs.next();
                     if (logTimer.expired()) {
                         long stop = clock.currentTimeInMillis();
@@ -372,7 +400,7 @@ public abstract class RelationalSnapshotChangeEventSource<O extends OffsetContex
                     if (snapshotContext.lastTable && snapshotContext.lastRecordInTable) {
                         lastSnapshotRecord(snapshotContext);
                     }
-                    dispatcher.dispatchSnapshotEvent(table.id(), getChangeRecordEmitter(snapshotContext, table.id(), row), snapshotReceiver);
+                    dispatcher.dispatchSnapshotEvent(dataCollectionSchema, tableSchema, newKey, envelope, snapshotContext.offset, snapshotReceiver);
                 }
             }
             else if (snapshotContext.lastTable) {

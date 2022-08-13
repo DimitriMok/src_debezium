@@ -40,6 +40,7 @@ import io.debezium.pipeline.spi.ChangeRecordEmitter.Receiver;
 import io.debezium.pipeline.spi.OffsetContext;
 import io.debezium.pipeline.spi.SchemaChangeEventEmitter;
 import io.debezium.pipeline.txmetadata.TransactionMonitor;
+import io.debezium.relational.TableSchema;
 import io.debezium.relational.history.ConnectTableChangeSerializer;
 import io.debezium.relational.history.HistoryRecord.Fields;
 import io.debezium.relational.history.TableChanges.TableChangesSerializer;
@@ -50,6 +51,7 @@ import io.debezium.schema.DatabaseSchema;
 import io.debezium.schema.HistorizedDatabaseSchema;
 import io.debezium.schema.SchemaChangeEvent;
 import io.debezium.schema.TopicSelector;
+import io.debezium.util.Clock;
 import io.debezium.util.SchemaNameAdjuster;
 
 /**
@@ -151,6 +153,25 @@ public class EventDispatcher<T extends DataCollectionId> {
                 .field(Fields.DDL_STATEMENTS, Schema.OPTIONAL_STRING_SCHEMA)
                 .field(Fields.TABLE_CHANGES, SchemaBuilder.array(ConnectTableChangeSerializer.CHANGE_SCHEMA).build())
                 .build();
+    }
+
+    public DataCollectionSchema getCollectionSchema(T dataCollectionId) {
+        // TODO Handle Heartbeat
+
+        DataCollectionSchema dataCollectionSchema = schema.schemaFor(dataCollectionId);
+
+        // TODO handle as per inconsistent schema info option
+        if (dataCollectionSchema == null) {
+            errorOnMissingSchema(dataCollectionId);
+        }
+        return dataCollectionSchema;
+    }
+
+    public void dispatchSnapshotEvent(DataCollectionSchema dataCollectionSchema, TableSchema tableSchema, Struct newKey, Struct envelope, OffsetContext offsetContext,
+                                       SnapshotReceiver receiver)
+            throws InterruptedException {
+        eventListener.onEvent(dataCollectionSchema.id(), offsetContext, newKey, envelope);
+        receiver.changeRecord(tableSchema, Operation.READ, newKey, envelope, offsetContext, null);
     }
 
     public void dispatchSnapshotEvent(T dataCollectionId, ChangeRecordEmitter changeRecordEmitter, SnapshotReceiver receiver) throws InterruptedException {
@@ -279,6 +300,11 @@ public class EventDispatcher<T extends DataCollectionId> {
     }
 
     public Optional<DataCollectionSchema> errorOnMissingSchema(T dataCollectionId, ChangeRecordEmitter changeRecordEmitter) {
+        eventListener.onErroneousEvent("source = " + dataCollectionId);
+        throw new IllegalArgumentException("No metadata registered for captured table " + dataCollectionId);
+    }
+
+    public Optional<DataCollectionSchema> errorOnMissingSchema(T dataCollectionId) {
         eventListener.onErroneousEvent("source = " + dataCollectionId);
         throw new IllegalArgumentException("No metadata registered for captured table " + dataCollectionId);
     }
@@ -545,7 +571,6 @@ public class EventDispatcher<T extends DataCollectionId> {
     /**
      * Enable support for incremental snapshotting.
      *
-     * @param eventListener
      */
     public void setIncrementalSnapshotChangeEventSource(Optional<IncrementalSnapshotChangeEventSource<? extends DataCollectionId>> incrementalSnapshotChangeEventSource) {
         this.incrementalSnapshotChangeEventSource = (IncrementalSnapshotChangeEventSource<T>) incrementalSnapshotChangeEventSource.orElse(null);

@@ -6,7 +6,9 @@
 package io.debezium.relational;
 
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
@@ -59,6 +61,14 @@ public class TableSchema implements DataCollectionSchema {
     private final Schema valueSchema;
     private final StructGenerator keyGenerator;
     private final StructGenerator valueGenerator;
+    private final StructAppender keyAppender;
+    private final StructAppender valueAppender;
+
+    private final Set<Column> keySet;
+
+    private final Set<Column> valueSet;
+
+    private final Map<Column, ValueConverter> converters;
 
     /**
      * Create an instance with the specified {@link Schema}s for the keys and values, and the functions that generate the
@@ -79,6 +89,27 @@ public class TableSchema implements DataCollectionSchema {
         this.valueSchema = valueSchema;
         this.keyGenerator = keyGenerator != null ? keyGenerator : (row) -> null;
         this.valueGenerator = valueGenerator != null ? valueGenerator : (row) -> null;
+        this.keyAppender = ((struct, column, value) -> null);
+        this.valueAppender = ((struct, column, value) -> null);
+        this.keySet = null;
+        this.valueSet = null;
+        this.converters = null;
+
+    }
+
+    public TableSchema(TableId id, Schema keySchema, StructAppender keyAppender, Envelope envelopeSchema, Schema valueSchema, StructAppender valueAppender,
+                       Set<Column> keySet, Set<Column> valueSet, Map<Column, ValueConverter> converters) {
+        this.id = id;
+        this.keySchema = keySchema;
+        this.envelopeSchema = envelopeSchema;
+        this.valueSchema = valueSchema;
+        this.keyGenerator = (row) -> null;
+        this.valueGenerator = (row) -> null;
+        this.keyAppender = keyAppender != null ? keyAppender : ((struct, column, value) -> null);
+        this.valueAppender = valueAppender != null ? valueAppender : ((struct, column, value) -> null);
+        this.valueSet = valueSet;
+        this.keySet = keySet;
+        this.converters = converters == null ? null : converters;
     }
 
     @Override
@@ -116,6 +147,18 @@ public class TableSchema implements DataCollectionSchema {
         return envelopeSchema;
     }
 
+    public Set<Column> getKeySet() {
+        return keySet;
+    }
+
+    public Set<Column> getValueSet() {
+        return valueSet;
+    }
+
+    public Map<Column, ValueConverter> getConverters() {
+        return converters;
+    }
+
     /**
      * Convert the specified row of values into a Kafka Connect key. The row is expected to conform to the structured defined
      * by the table.
@@ -130,6 +173,13 @@ public class TableSchema implements DataCollectionSchema {
         return columnData == null ? null : keyGenerator.generateValue(columnData);
     }
 
+    public Struct keyFromColumnData(Struct newKey, Column column, Object columnData) {
+        if (LOGGER.isTraceEnabled()) {
+            LOGGER.trace("columnData from current stack: {}", columnData.toString());
+        }
+        return keyAppender.appendValue(newKey, column, columnData);
+    }
+
     /**
      * Convert the specified row of values into a Kafka Connect value. The row is expected to conform to the structured defined
      * by the table.
@@ -139,6 +189,10 @@ public class TableSchema implements DataCollectionSchema {
      */
     public Struct valueFromColumnData(Object[] columnData) {
         return columnData == null ? null : valueGenerator.generateValue(columnData);
+    }
+
+    public Struct valueFromColumnData(Struct newValue, Column column, Object columnData) {
+        return valueAppender.appendValue(newValue, column, columnData);
     }
 
     @Override
